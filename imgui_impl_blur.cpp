@@ -5,6 +5,7 @@
 
 #include <d3d11.h>
 #include <d3dcompiler.h>
+#include "imgui_async.h"
 
 #ifdef _MSC_VER
 #pragma comment(lib, "d3dcompiler")
@@ -15,13 +16,16 @@ struct ImGui_ImplBlur_Data
     ID3D11Texture2D* screen_texture;
     ID3D11ShaderResourceView* screen_srv;
     ID3D11Texture2D* blur_texture;
-	ID3D11RenderTargetView* blur_rtv;
+    ID3D11RenderTargetView* blur_rtv;
     ID3D11VertexShader* vertex_shader;
-	ID3D11PixelShader* pixel_shader;
+    ID3D11PixelShader* pixel_shader;
     ID3D11InputLayout* input_layout;
     ID3D11SamplerState* sampler_state;
     ID3D11Buffer* quad_buffer;
-	ID3D11Buffer* buffer;
+    ID3D11Buffer* buffer;
+
+    int backbuffer_width;
+    int backbuffer_height;
 
     struct Uniforms {
         float half_pixel[2];
@@ -41,10 +45,10 @@ static ImGui_ImplBlur_Data* ImGui_ImplBlur_GetBackendData()
 
 static ID3DBlob* ImGui_ImplBlur_CompileShader(const char* src, const char* entry, const char* target, ID3D11Device* device)
 {
-	ID3DBlob* blob = nullptr;
-	ID3DBlob* error_blob = nullptr;
-	if (FAILED(D3DCompile(src, strlen(src), nullptr, nullptr, nullptr, entry, target, 0, 0, &blob, &error_blob)))
-	{
+    ID3DBlob* blob = nullptr;
+    ID3DBlob* error_blob = nullptr;
+    if (FAILED(D3DCompile(src, strlen(src), nullptr, nullptr, nullptr, entry, target, 0, 0, &blob, &error_blob)))
+    {
         if (error_blob)
         {
             ImGui::ErrorLog((const char*)error_blob->GetBufferPointer());
@@ -56,8 +60,8 @@ static ID3DBlob* ImGui_ImplBlur_CompileShader(const char* src, const char* entry
             IM_ASSERT(false && "Unknown shader compilation error");
         }
         return nullptr;
-	}
-	return blob;
+    }
+    return blob;
 }
 
 static void ImGui_ImplBlur_CreateShaders(ID3D11Device* device)
@@ -65,7 +69,7 @@ static void ImGui_ImplBlur_CreateShaders(ID3D11Device* device)
     ImGui_ImplBlur_Data* bd = ImGui_ImplBlur_GetBackendData();
     ImGuiPlatformIO& platform_io = ImGui::GetPlatformIO();
 
-    static const char* vertex_shader = R"(
+    constexpr const char* vertex_shader = R"(
         struct VSInput {
             float2 pos : POSITION;
             float2 uv : TEXCOORD;
@@ -101,30 +105,32 @@ static void ImGui_ImplBlur_CreateShaders(ID3D11Device* device)
 
         float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_TARGET {
             float2 scatter = offset + hash22(pos.xy) * offset * 2.0;
-
+            float dx = half_pixel.x * scatter;
+            float dy = half_pixel.y * scatter;
+            
             float4 sum = input_texture.Sample(sampler_linear, uv) * 4.0;
-            sum += input_texture.Sample(sampler_linear, uv - float2(half_pixel.x, half_pixel.y) * scatter);
-            sum += input_texture.Sample(sampler_linear, uv + float2(half_pixel.x, half_pixel.y) * scatter);
-            sum += input_texture.Sample(sampler_linear, uv + float2(half_pixel.x, -half_pixel.y) * scatter);
-            sum += input_texture.Sample(sampler_linear, uv - float2(half_pixel.x, -half_pixel.y) * scatter);
-
-            sum += input_texture.Sample(sampler_linear, uv + float2(-half_pixel.x * 2.0, 0.0) * scatter);
-            sum += input_texture.Sample(sampler_linear, uv + float2(-half_pixel.x, half_pixel.y) * scatter) * 2.0;
-            sum += input_texture.Sample(sampler_linear, uv + float2(0.0, half_pixel.y * 2.0) * scatter);
-            sum += input_texture.Sample(sampler_linear, uv + float2(half_pixel.x, half_pixel.y) * scatter) * 2.0;
-            sum += input_texture.Sample(sampler_linear, uv + float2(half_pixel.x * 2.0, 0.0) * scatter);
-            sum += input_texture.Sample(sampler_linear, uv + float2(half_pixel.x, -half_pixel.y) * scatter) * 2.0;
-            sum += input_texture.Sample(sampler_linear, uv + float2(0.0, -half_pixel.y * 2.0) * scatter);
-            sum += input_texture.Sample(sampler_linear, uv + float2(-half_pixel.x, -half_pixel.y) * scatter) * 2.0;
+            sum += input_texture.Sample(sampler_linear, uv + float2(-dx, -dy));
+            sum += input_texture.Sample(sampler_linear, uv + float2( dx,  dy));
+            sum += input_texture.Sample(sampler_linear, uv + float2( dx, -dy));
+            sum += input_texture.Sample(sampler_linear, uv + float2(-dx,  dy));
+            
+            sum += input_texture.Sample(sampler_linear, uv + float2(-2.0 * dx, 0.0));
+            sum += input_texture.Sample(sampler_linear, uv + float2(-dx, dy)) * 2.0;
+            sum += input_texture.Sample(sampler_linear, uv + float2(0.0, 2.0 * dy));
+            sum += input_texture.Sample(sampler_linear, uv + float2(dx, dy)) * 2.0;
+            sum += input_texture.Sample(sampler_linear, uv + float2(2.0 * dx, 0.0));
+            sum += input_texture.Sample(sampler_linear, uv + float2(dx, -dy)) * 2.0;
+            sum += input_texture.Sample(sampler_linear, uv + float2(0.0, -2.0 * dy));
+            sum += input_texture.Sample(sampler_linear, uv + float2(-dx, -dy)) * 2.0;
 
             return sum / 20.0;
         }
     )";
 
     ID3DBlob* vertex_shader_blob = ImGui_ImplBlur_CompileShader(vertex_shader, "main", "vs_5_0", device);
-	ID3DBlob* pixel_blob = ImGui_ImplBlur_CompileShader(kawase_upsample, "main", "ps_5_0", device);
-	IM_ASSERT(vertex_shader_blob != nullptr && pixel_blob != nullptr && "Failed to compile shaders!");
-    
+    ID3DBlob* pixel_blob = ImGui_ImplBlur_CompileShader(kawase_upsample, "main", "ps_5_0", device);
+    IM_ASSERT(vertex_shader_blob != nullptr && pixel_blob != nullptr && "Failed to compile shaders!");
+
     device->CreateVertexShader(vertex_shader_blob->GetBufferPointer(), vertex_shader_blob->GetBufferSize(), nullptr, &bd->vertex_shader);
     device->CreatePixelShader(pixel_blob->GetBufferPointer(), pixel_blob->GetBufferSize(), nullptr, &bd->pixel_shader);
 
@@ -135,18 +141,18 @@ static void ImGui_ImplBlur_CreateShaders(ID3D11Device* device)
     };
     device->CreateInputLayout(layout_desc, 2, vertex_shader_blob->GetBufferPointer(), vertex_shader_blob->GetBufferSize(), &bd->input_layout);
 
-	D3D11_SAMPLER_DESC sampler_desc = {};
+    D3D11_SAMPLER_DESC sampler_desc = {};
     sampler_desc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
     sampler_desc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
     sampler_desc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
     sampler_desc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
     device->CreateSamplerState(&sampler_desc, &bd->sampler_state);
 
-	struct QuadVertex
-	{
-		float position[2];
-		float uv[2];
-	};
+    struct QuadVertex
+    {
+        float position[2];
+        float uv[2];
+    };
 
     QuadVertex vertices[] =
     {
@@ -154,15 +160,15 @@ static void ImGui_ImplBlur_CreateShaders(ID3D11Device* device)
         {  1, -1, 1, 1 }, { -1,  1, 0, 0 }, {  1,  1, 1, 0 }
     };
 
-	D3D11_BUFFER_DESC buffer_desc = {};
-	buffer_desc.Usage = D3D11_USAGE_IMMUTABLE;
-	buffer_desc.ByteWidth = sizeof(vertices);
-	buffer_desc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+    D3D11_BUFFER_DESC buffer_desc = {};
+    buffer_desc.Usage = D3D11_USAGE_IMMUTABLE;
+    buffer_desc.ByteWidth = sizeof(vertices);
+    buffer_desc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
 
-	D3D11_SUBRESOURCE_DATA buffer_data = {};
+    D3D11_SUBRESOURCE_DATA buffer_data = {};
     buffer_data.pSysMem = vertices;
 
-	device->CreateBuffer(&buffer_desc, &buffer_data, &bd->quad_buffer);
+    device->CreateBuffer(&buffer_desc, &buffer_data, &bd->quad_buffer);
 
     D3D11_BUFFER_DESC pixel_buffer_desc = {};
     pixel_buffer_desc.Usage = D3D11_USAGE_DYNAMIC;
@@ -170,18 +176,18 @@ static void ImGui_ImplBlur_CreateShaders(ID3D11Device* device)
     pixel_buffer_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     pixel_buffer_desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
 
-    device->CreateBuffer(&pixel_buffer_desc, nullptr, & bd->buffer);
+    device->CreateBuffer(&pixel_buffer_desc, nullptr, &bd->buffer);
 
     if (vertex_shader_blob) vertex_shader_blob->Release();
-	if (pixel_blob) pixel_blob->Release();
+    if (pixel_blob) pixel_blob->Release();
 }
 
 static void ImGui_ImplBlur_DestroyShaders()
 {
     ImGui_ImplBlur_Data* bd = ImGui_ImplBlur_GetBackendData();
     if (bd->vertex_shader) bd->vertex_shader->Release();
-	if (bd->pixel_shader) bd->pixel_shader->Release();
-	if (bd->input_layout) bd->input_layout->Release();
+    if (bd->pixel_shader) bd->pixel_shader->Release();
+    if (bd->input_layout) bd->input_layout->Release();
     if (bd->quad_buffer) { bd->quad_buffer->Release(); }
     if (bd->sampler_state) { bd->sampler_state->Release(); }
     if (bd->blur_rtv) { bd->blur_rtv->Release(); }
@@ -191,7 +197,7 @@ static void ImGui_ImplBlur_DestroyShaders()
 
 static void ImGui_ImplBlur_Begin(const ImDrawList* draw_list, const ImDrawCmd* draw_cmd)
 {
-	ImGui_ImplBlur_Data* bd = ImGui_ImplBlur_GetBackendData();
+    ImGui_ImplBlur_Data* bd = ImGui_ImplBlur_GetBackendData();
     ImGuiPlatformIO& platform_io = ImGui::GetPlatformIO();
 
     ImGui_ImplDX11_RenderState* render_state = (ImGui_ImplDX11_RenderState*)platform_io.Renderer_RenderState;
@@ -211,6 +217,36 @@ static void ImGui_ImplBlur_Begin(const ImDrawList* draw_list, const ImDrawCmd* d
     rtv_resource->Release();
     if (!back_buffer) return;
 
+    D3D11_TEXTURE2D_DESC backbuffer_desc;
+    back_buffer->GetDesc(&backbuffer_desc);
+
+    if (bd->backbuffer_width != (int)backbuffer_desc.Width || bd->backbuffer_height != (int)backbuffer_desc.Height)
+    {
+        bd->backbuffer_width = (int)backbuffer_desc.Width;
+        bd->backbuffer_height = (int)backbuffer_desc.Height;
+
+        if (bd->screen_texture) { bd->screen_texture->Release(); bd->screen_texture = nullptr; }
+        if (bd->screen_srv) { bd->screen_srv->Release();     bd->screen_srv = nullptr; }
+        if (bd->blur_texture) { bd->blur_texture->Release();   bd->blur_texture = nullptr; }
+        if (bd->blur_rtv) { bd->blur_rtv->Release();       bd->blur_rtv = nullptr; }
+
+        ID3D11Device* device = nullptr;
+        back_buffer->GetDevice(&device);
+
+        backbuffer_desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        backbuffer_desc.Usage = D3D11_USAGE_DEFAULT;
+
+        device->CreateTexture2D(&backbuffer_desc, nullptr, &bd->screen_texture);
+        device->CreateShaderResourceView(bd->screen_texture, nullptr, &bd->screen_srv);
+        device->CreateTexture2D(&backbuffer_desc, nullptr, &bd->blur_texture);
+        device->CreateRenderTargetView(bd->blur_texture, nullptr, &bd->blur_rtv);
+
+        device->Release();
+
+        bd->uniforms.half_pixel[0] = 1.0f / (float)backbuffer_desc.Width;
+        bd->uniforms.half_pixel[1] = 1.0f / (float)backbuffer_desc.Height;
+    }
+
     device_context->CopyResource(bd->screen_texture, back_buffer);
     back_buffer->Release();
 }
@@ -218,7 +254,7 @@ static void ImGui_ImplBlur_Begin(const ImDrawList* draw_list, const ImDrawCmd* d
 static void ImGui_ImplBlur_End(const ImDrawList* draw_list, const ImDrawCmd* draw_cmd)
 {
     ImGuiPlatformIO& platform_io = ImGui::GetPlatformIO();
-    
+
     ImGui_ImplDX11_RenderState* render_state = (ImGui_ImplDX11_RenderState*)platform_io.Renderer_RenderState;
     ID3D11DeviceContext* device_context = render_state->DeviceContext;
 
@@ -350,7 +386,7 @@ IMGUI_API void ImGui_ImplBlur_Rect(ImVec2 min, ImVec2 max, ImDrawList* draw_list
 
     draw_list->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
 
-    draw_list->AddImageRounded((ImTextureID)bd->screen_srv, min, max, { min.x / io.DisplaySize.x, min.y / io.DisplaySize.y }, { max.x / io.DisplaySize.x, max.y / io.DisplaySize.y }, IM_COL32_WHITE, rounding, draw_flags);
+    draw_list->AddImageRounded((ImTextureID)bd->screen_srv, min, max, { min.x / io.DisplaySize.x, min.y / io.DisplaySize.y }, { max.x / io.DisplaySize.x, max.y / io.DisplaySize.y }, ImGui::GetColorU32(ImGuiCol_Blur), rounding, draw_flags);
 }
 
 //-----------------------------------------------------------------------------
