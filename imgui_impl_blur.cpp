@@ -27,15 +27,18 @@ struct ImGui_ImplBlur_Data
     int backbuffer_width;
     int backbuffer_height;
 
-    struct Uniforms {
-        float half_pixel[2];
-        float offset;
-        float _padding;
-    } uniforms;
-
-    int iterations = 0;
-
     ImGui_ImplBlur_Data() { memset((void*)this, 0, sizeof(*this)); }
+};
+
+struct ImGui_ImplBlur_Uniforms {
+    float half_pixel[2];
+    float offset;
+    float _padding;
+};
+
+struct ImGui_ImplBlur_Params {
+    ImGui_ImplBlur_Uniforms uniforms;
+    int iterations;
 };
 
 static ImGui_ImplBlur_Data* ImGui_ImplBlur_GetBackendData()
@@ -172,7 +175,7 @@ static void ImGui_ImplBlur_CreateShaders(ID3D11Device* device)
 
     D3D11_BUFFER_DESC pixel_buffer_desc = {};
     pixel_buffer_desc.Usage = D3D11_USAGE_DYNAMIC;
-    pixel_buffer_desc.ByteWidth = sizeof(ImGui_ImplBlur_Data::Uniforms);
+    pixel_buffer_desc.ByteWidth = sizeof(ImGui_ImplBlur_Uniforms);
     pixel_buffer_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     pixel_buffer_desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
 
@@ -242,9 +245,6 @@ static void ImGui_ImplBlur_Begin(const ImDrawList* draw_list, const ImDrawCmd* d
         device->CreateRenderTargetView(bd->blur_texture, nullptr, &bd->blur_rtv);
 
         device->Release();
-
-        bd->uniforms.half_pixel[0] = 1.0f / (float)backbuffer_desc.Width;
-        bd->uniforms.half_pixel[1] = 1.0f / (float)backbuffer_desc.Height;
     }
 
     device_context->CopyResource(bd->screen_texture, back_buffer);
@@ -266,6 +266,7 @@ static void ImGui_ImplBlur_Pass(const ImDrawList* draw_list, const ImDrawCmd* dr
 {
     ImGui_ImplBlur_Data* bd = ImGui_ImplBlur_GetBackendData();
     ImGuiPlatformIO& platform_io = ImGui::GetPlatformIO();
+    ImGui_ImplBlur_Params* params = (ImGui_ImplBlur_Params*)draw_cmd->UserCallbackData;
 
     ImGui_ImplDX11_RenderState* render_state = (ImGui_ImplDX11_RenderState*)platform_io.Renderer_RenderState;
     ID3D11DeviceContext* device_context = render_state->DeviceContext;
@@ -273,7 +274,7 @@ static void ImGui_ImplBlur_Pass(const ImDrawList* draw_list, const ImDrawCmd* dr
     D3D11_MAPPED_SUBRESOURCE mapped;
     if (SUCCEEDED(device_context->Map(bd->buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
     {
-        memcpy(mapped.pData, &bd->uniforms, sizeof(bd->uniforms));
+        memcpy(mapped.pData, &params->uniforms, sizeof(params->uniforms));
         device_context->Unmap(bd->buffer, 0);
     }
 
@@ -295,7 +296,7 @@ static void ImGui_ImplBlur_Pass(const ImDrawList* draw_list, const ImDrawCmd* dr
     device_context->PSSetSamplers(0, 1, &bd->sampler_state);
     device_context->PSSetConstantBuffers(0, 1, &bd->buffer);
 
-    for (int i = 0; i < bd->iterations; ++i)
+    for (int i = 0; i < params->iterations; ++i)
     {
         device_context->Draw(6, 0);
         device_context->CopyResource(bd->screen_texture, bd->blur_texture);
@@ -357,17 +358,26 @@ void ImGui_ImplBlur_Apply(ImDrawList* draw_list, int iterations, float offset)
     IM_ASSERT(bd != nullptr && "Context or backend not initialized! Did you call ImGui_ImplBlur_Init()?");
 
     ImGuiIO& io = ImGui::GetIO();
-    bd->uniforms = { 1.0f / io.DisplaySize.x, 1.0f / io.DisplaySize.y, offset, 0 };
-    bd->iterations = iterations;
+
+    ImGui_ImplBlur_Params* params = IM_NEW(ImGui_ImplBlur_Params)();
+    params->iterations = iterations;
+    params->uniforms = {
+        1.0f / io.DisplaySize.x,
+        1.0f / io.DisplaySize.y,
+        offset,
+        0.0f
+    };
 
     draw_list->AddDrawCmd();
     draw_list->AddCallback(ImGui_ImplBlur_Begin, nullptr);
-    draw_list->AddCallback(ImGui_ImplBlur_Pass, nullptr);
+    draw_list->AddCallback(ImGui_ImplBlur_Pass, params);
     draw_list->AddCallback(ImGui_ImplBlur_End, nullptr);
-
     draw_list->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
-
     draw_list->AddImage((ImTextureID)bd->screen_srv, { 0.0f, 0.0f }, io.DisplaySize);
+
+    draw_list->AddCallback([](const ImDrawList*, const ImDrawCmd* cmd) {
+        IM_DELETE((ImGui_ImplBlur_Params*)cmd->UserCallbackData);
+        }, params);
 }
 
 IMGUI_API void ImGui_ImplBlur_Rect(ImVec2 min, ImVec2 max, ImDrawList* draw_list, int iterations, float offset, float rounding, ImDrawFlags draw_flags)
@@ -376,17 +386,26 @@ IMGUI_API void ImGui_ImplBlur_Rect(ImVec2 min, ImVec2 max, ImDrawList* draw_list
     IM_ASSERT(bd != nullptr && "Context or backend not initialized! Did you call ImGui_ImplBlur_Init()?");
 
     ImGuiIO& io = ImGui::GetIO();
-    bd->uniforms = { 1.0f / io.DisplaySize.x, 1.0f / io.DisplaySize.y, offset, 0 };
-    bd->iterations = iterations;
+    
+    ImGui_ImplBlur_Params* params = IM_NEW(ImGui_ImplBlur_Params)();
+    params->iterations = iterations;
+    params->uniforms = {
+        1.0f / io.DisplaySize.x,
+        1.0f / io.DisplaySize.y,
+        offset,
+        0.0f
+    };
 
     draw_list->AddDrawCmd();
     draw_list->AddCallback(ImGui_ImplBlur_Begin, nullptr);
-    draw_list->AddCallback(ImGui_ImplBlur_Pass, nullptr);
+    draw_list->AddCallback(ImGui_ImplBlur_Pass, params);
     draw_list->AddCallback(ImGui_ImplBlur_End, nullptr);
-
     draw_list->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
-
     draw_list->AddImageRounded((ImTextureID)bd->screen_srv, min, max, { min.x / io.DisplaySize.x, min.y / io.DisplaySize.y }, { max.x / io.DisplaySize.x, max.y / io.DisplaySize.y }, ImGui::GetColorU32(ImGuiCol_Blur), rounding, draw_flags);
+
+    draw_list->AddCallback([](const ImDrawList*, const ImDrawCmd* cmd) {
+        IM_DELETE((ImGui_ImplBlur_Params*)cmd->UserCallbackData);
+        }, params);
 }
 
 //-----------------------------------------------------------------------------
